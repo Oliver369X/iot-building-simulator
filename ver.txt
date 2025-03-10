@@ -1,0 +1,65 @@
+Aquí está la lista de tareas pendientes para completar el desarrollo:
+
+1. **Backend (API)**
+```markdown
+- [ ] Implementar endpoint para detener simulación (/api/simulation/{id}/stop)
+- [ ] Implementar endpoint para actualizar estado de dispositivos (/api/devices/{id}/status)
+- [ ] Mejorar WebSocket para transmitir datos en tiempo real
+- [ ] Añadir validación de datos en endpoints
+- [ ] Implementar manejo de errores consistente
+```
+
+2. **Frontend (Componentes)**
+```markdown
+- [ ] BuildingList.tsx: Implementar función de eliminación de edificios
+- [ ] Crear FloorView.tsx para visualizar pisos y habitaciones
+- [ ] Crear RoomView.tsx para mostrar dispositivos por habitación
+- [ ] Implementar vista de simulación en tiempo real
+- [ ] Añadir notificaciones y alertas
+```
+
+3. **Integración**
+```markdown
+- [ ] Configurar proxy para desarrollo local
+- [ ] Implementar manejo de estado global (Context o Redux)
+- [ ] Añadir sistema de autenticación
+- [ ] Implementar manejo de errores y reconexión de WebSocket
+```
+
+4. **Funcionalidades Adicionales**
+```markdown
+- [ ] Sistema de alertas para valores anormales
+- [ ] Exportación de datos históricos
+- [ ] Configuración de reglas de simulación
+- [ ] Presets de configuración de edificios
+- [ ] Dashboard de estadísticas
+```
+
+5. **Documentación**
+```markdown
+- [ ] Guía de instalación completa
+- [ ] Documentación de API
+- [ ] Manual de usuario
+- [ ] Ejemplos de uso
+- [ ] Guía de contribución
+```
+
+6. **Testing**
+```markdown
+- [ ] Tests unitarios frontend
+- [ ] Tests de integración
+- [ ] Tests end-to-end
+- [ ] Tests de rendimiento
+- [ ] Documentación de pruebas
+```
+
+7. **Despliegue**
+```markdown
+- [ ] Configuración de Docker para producción
+- [ ] Scripts de despliegue
+- [ ] Monitorización y logs
+- [ ] Backup y recuperación
+- [ ] Guía de mantenimiento
+```
+
+¿Por dónde prefieres que empecemos? Podemos priorizar las tareas según tus necesidades inmediatas.

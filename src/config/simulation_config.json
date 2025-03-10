@@ -1,0 +1,42 @@
+{
+    "simulation": {
+        "time_scale": 1.0,
+        "duration": "24h",
+        "data_dir": "./data"
+    },
+    "buildings": [
+        {
+            "id": "building_01",
+            "name": "Edificio Principal",
+            "location": {
+                "city": "Madrid",
+                "latitude": 40.4168,
+                "longitude": -3.7038
+            },
+            "floors": [
+                {
+                    "floor_number": 1,
+                    "rooms": [
+                        {
+                            "type": "office",
+                            "area": 50,
+                            "devices": [
+                                {"type": "temperature_sensor", "config": {"update_interval": 300}},
+                                {"type": "hvac_controller", "config": {"target_temp": 22}},
+                                {"type": "motion_sensor", "config": {"sensitivity": 0.8}}
+                            ]
+                        },
+                        {
+                            "type": "meeting_room",
+                            "area": 30,
+                            "devices": [
+                                {"type": "temperature_sensor", "config": {}},
+                                {"type": "smart_plug", "config": {"device_connected": "projector"}}
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+} 

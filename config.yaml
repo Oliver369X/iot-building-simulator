@@ -1,0 +1,25 @@
+simulation:
+  # Configuración básica
+  name: "Mi Simulación"
+  duration_hours: 24
+  time_scale: 1.0
+
+buildings:
+  - name: "Edificio Principal"
+    type: "office"  # office, residential, mixed
+    floors: 5  # Número entero
+    rooms_per_floor: 4  # Número entero
+    devices_per_room:
+      temperature_sensor: 1
+      hvac_controller: 1
+      motion_sensor: 1
+      smart_plug: 2
+
+  - name: "Edificio Residencial"
+    type: "residential"
+    floors: 10
+    rooms_per_floor: 6
+    devices_per_room:
+      temperature_sensor: 1
+      smart_plug: 4
+      security_camera: 1 

@@ -1,0 +1,57 @@
+name: IoT Building Simulator CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.8, 3.9]
+
+    steps:
+    - uses: actions/checkout@v2
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v2
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-cov flake8 mypy
+    
+    - name: Run tests with pytest
+      run: |
+        pytest tests/ --cov=src/ --cov-report=xml
+    
+    - name: Run type checking
+      run: |
+        mypy src/
+    
+    - name: Lint with flake8
+      run: |
+        flake8 src/ tests/ --max-line-length=100
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v2
+    
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: 3.9
+    
+    - name: Build package
+      run: |
+        pip install build
+        python -m build 
