@@ -1,59 +1,37 @@
 version: '3.8'
 
 services:
-  # Base de datos TimescaleDB
-  timescaledb:
-    image: timescale/timescaledb:latest-pg14
-    container_name: postgres-timescale
-    environment:
-      POSTGRES_DB: ${DB_NAME}
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-    volumes:
-      - timescale_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
-    networks:
-      - iot_network
-
-  # API Backend
   api:
-    build:
-      context: .
-      dockerfile: docker/backend.Dockerfile
-    container_name: iot-api
-    environment:
-      - DB_HOST=${DB_HOST}
-      - DB_PORT=${DB_PORT}
-      - DB_NAME=${DB_NAME}
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
-    volumes:
-      - ./logs:/var/log/iot-simulator
+    build: .
     ports:
       - "8000:8000"
+    environment:
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - DATABASE_URL=postgresql://postgres:071104@db:5432/iot_simulator
     depends_on:
-      - timescaledb
+      - db
+    volumes:
+      - ./:/app
     networks:
-      - iot_network
+      - iot-network
 
-  # Frontend
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: docker/frontend.Dockerfile
-      args:
-        - REACT_APP_API_URL=${REACT_APP_API_URL}
-        - REACT_APP_WS_URL=${REACT_APP_WS_URL}
-    container_name: iot-frontend
+  db:
+    image: postgres:13
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=071104
+      - POSTGRES_DB=iot_simulator
     ports:
-      - "80:80"
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
     networks:
-      - iot_network
+      - iot-network
 
 volumes:
-  timescale_data:
+  postgres_data:
 
 networks:
-  iot_network:
+  iot-network:
     driver: bridge 
