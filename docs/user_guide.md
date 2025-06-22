@@ -2,7 +2,7 @@
 
 ## Introducción
 
-El IoT Building Simulator es una herramienta para simular dispositivos IoT en edificios, permitiendo generar datos realistas para pruebas y desarrollo. Esta guía te ayudará a configurar y ejecutar simulaciones.
+El IoT Building Simulator es una herramienta avanzada para la simulación de ecosistemas IoT en edificios inteligentes. Permite no solo generar datos realistas para pruebas y desarrollo, sino también gestionar individualmente dispositivos, programar su encendido y apagado, ejecutar simulaciones más realistas y detalladas, y administrar de forma granular habitaciones y pisos. Esta guía te ayudará a configurar, ejecutar y gestionar simulaciones complejas, aprovechando la capacidad de simulación individualizada y el soporte para una gama más amplia de tipos de dispositivos.
 
 ## Instalación
 
@@ -49,6 +49,96 @@ room_templates:
       - type: "temperature_sensor"
       - type: "motion_sensor"
 ```
+
+### Configuración Avanzada de Dispositivos
+
+Además de la configuración básica por tipo, puedes definir parámetros específicos para dispositivos individuales dentro de las plantillas de habitación o directamente en la definición de una habitación.
+
+**Ejemplo de Configuración de Dispositivo Individual:**
+```yaml
+room_templates:
+ office_conference:
+   area: 40
+   devices:
+     - type: "hvac_controller"
+       id: "hvac_conf_01"
+       initial_state: "on" # 'on', 'off'
+       set_point: 22.5
+       schedule: # Programación de encendido/apagado
+         - action: "on"
+           time: "08:00:00" # Hora de encendido
+           days: ["mon", "tue", "wed", "thu", "fri"]
+         - action: "off"
+           time: "18:00:00" # Hora de apagado
+           days: ["mon", "tue", "wed", "thu", "fri"]
+     - type: "smart_plug"
+       id: "plug_printer_01"
+       initial_state: "off"
+       # Otros parámetros específicos del smart_plug
+```
+
+**Parámetros Comunes para Configuración Avanzada:**
+- `id`: (Opcional) Un identificador único para el dispositivo si necesitas referenciarlo específicamente.
+- `initial_state`: Define el estado inicial del dispositivo (`on` o `off`).
+- `schedule`: Una lista de acciones programadas. Cada acción incluye:
+   - `action`: `"on"` o `"off"`.
+   - `time`: Hora de la acción en formato `HH:MM:SS`.
+   - `days`: (Opcional) Lista de días de la semana para aplicar la acción (ej: `["mon", "fri"]`). Si se omite, se aplica todos los días.
+   - `date`: (Opcional) Fecha específica en formato `YYYY-MM-DD` para una acción única.
+
+### Gestión Detallada de Espacios (Pisos y Habitaciones)
+
+Puedes definir propiedades más específicas para pisos y habitaciones para simulaciones más realistas.
+
+**Ejemplo de Configuración Detallada de Piso/Habitación:**
+```yaml
+floors_config:
+ - floor_number: 1
+   name: "Planta Baja"
+   occupancy_profile: "office_hours_ground" # Perfil de ocupación específico
+   rooms:
+     - room_id: "lobby_01"
+       name: "Recepción Principal"
+       template: "lobby_template"
+       area: 100
+       max_occupants: 15
+       # Dispositivos específicos para esta habitación, sobreescribiendo o añadiendo a la plantilla
+       devices:
+         - type: "access_control"
+           id: "main_entrance_access"
+## Gestión Avanzada de Dispositivos y Espacios
+
+Una de las mejoras clave del simulador es la capacidad de gestionar dispositivos y espacios de forma individual y dinámica durante una simulación activa. Esto se logra principalmente a través de la API (ver [`API Documentation`](api_documentation.md)).
+
+### Control Individual de Dispositivos
+
+Puedes encender, apagar o modificar parámetros de dispositivos específicos en tiempo real.
+
+**Ejemplos de Acciones (vía API):**
+- **Encender/Apagar un dispositivo:**
+  - `PATCH /api/devices/{device_id}/state` con `{"state": "on"}` o `{"state": "off"}`.
+- **Ajustar el setpoint de un termostato:**
+  - `PATCH /api/devices/{hvac_id}/config` con `{"set_point": 23.0}`.
+- **Modificar la programación de un dispositivo:**
+  - `PUT /api/devices/{device_id}/schedule` con la nueva estructura de programación.
+
+### Gestión Dinámica de Espacios
+
+Aunque la estructura del edificio (pisos, habitaciones) se define inicialmente, ciertos aspectos pueden ser influenciados o consultados dinámicamente.
+
+**Ejemplos (vía API):**
+- **Obtener el estado actual de una habitación (ocupación, dispositivos activos):**
+  - `GET /api/rooms/{room_id}/status`
+- **Simular eventos en una habitación (ej. entrada/salida de ocupantes):**
+  - `POST /api/rooms/{room_id}/event` con `{"event_type": "occupancy_change", "occupants": 5}`
+
+Estas capacidades permiten crear escenarios de simulación mucho más interactivos y realistas, donde puedes reaccionar a eventos simulados o probar la respuesta del sistema a cambios manuales.
+           rules: "employees_only_after_hours"
+ - floor_number: 2
+   name: "Oficinas Ejecutivas"
+   # ... más configuraciones de piso
+```
+Esto permite un control más fino sobre la estructura y el comportamiento de cada parte del edificio.
 
 ### Tipos de Dispositivos Soportados
 

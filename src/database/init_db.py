@@ -8,8 +8,9 @@ logger = logging.getLogger(__name__)
 def clean_database():
     """Elimina todas las tablas existentes"""
     try:
-        Base.metadata.drop_all(engine)
-        logger.info("Base de datos limpiada correctamente")
+        logger.info("Limpiando la base de datos...")
+        Base.metadata.drop_all(engine) # Elimina todas las tablas definidas en Base.metadata
+        logger.info("Base de datos limpiada correctamente.")
     except Exception as e:
         logger.error(f"Error limpiando base de datos: {str(e)}")
         raise
@@ -33,4 +34,4 @@ def init_db():
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    init_db() 
+    init_db()

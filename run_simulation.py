@@ -1,3 +1,12 @@
+import sys
+from pathlib import Path
+
+# Añadir el directorio del proyecto al PYTHONPATH para encontrar 'src'
+# y para que la carga de config.yaml sea robusta.
+SCRIPT_DIR = Path(__file__).parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
 import yaml
 import click
 from src.simulator.engine import SimulationEngine
@@ -43,7 +52,8 @@ def async_command(f):
 async def run_simulation(config, verbose):
     """Ejecuta la simulación usando la configuración del archivo YAML"""
     
-    with open(config, 'r') as f:
+    config_path = SCRIPT_DIR / config
+    with open(config_path, 'r') as f:
         config_data = yaml.safe_load(f)
     
     engine = SimulationEngine()
