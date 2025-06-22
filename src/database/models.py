@@ -164,3 +164,19 @@ class SensorReading(MixinAsDict, Base):
 #     description = Column(String)
 #     technician = Column(String)
 #     extra_data = Column(JSON)
+
+class AggregatedReading(MixinAsDict, Base):
+    __tablename__ = 'aggregated_readings'
+    __table_args__ = (
+        Index('idx_aggregated_time', 'entity_type', 'entity_id', 'timestamp'),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    entity_type = Column(String, nullable=False)  # 'building', 'floor', 'room', 'device', 'kpi'
+    entity_id = Column(String, nullable=False)    # ID de la entidad agregada
+    timestamp = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    key = Column(String, nullable=False)          # Ej: 'power_consumption', 'active_alarms', 'avg_temperature', etc.
+    value = Column(Float, nullable=False)
+    unit = Column(String, nullable=True)          # Ej: 'kWh', 'W', 'C', etc.
+    period_seconds = Column(Integer, nullable=False)  # Periodo de agregación en segundos (ej: 60 para 1 min)
+    extra_data = Column(JSON, nullable=True)      # Para detalles adicionales

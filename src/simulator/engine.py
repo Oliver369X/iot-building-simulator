@@ -8,6 +8,7 @@ import asyncio
 import random # Keep for simulation logic if needed later
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy import func, String, cast
 
 # Import core building class if it's used for internal logic, otherwise rely on DB models
 # from ..core.building import Building as CoreBuilding # Example if core classes are distinct
@@ -16,8 +17,9 @@ from .scheduler import Scheduler
 
 # Updated database model imports
 from ..database.models import Base
-from ..database.models import Building, Floor, Room, Device, DeviceType, DeviceSchedule, Alarm
+from ..database.models import Building, Floor, Room, Device, DeviceType, DeviceSchedule, Alarm, AggregatedReading
 from ..database.models import SensorReading # Kept for now
+from ..database.connection import SessionLocal
 
 # Import Pydantic models for type hinting in CRUD operations
 from ..api import validators as api_validators
@@ -59,6 +61,9 @@ class SimulationEngine:
         
         self.status = "initialized" # Engine status
         self._telemetry_queue: Optional[asyncio.Queue] = None # For real-time telemetry via WebSocket
+        self._main_loop_task: Optional[asyncio.Task] = None  # Referencia a la tarea principal
+        self._aggregation_worker_task: Optional[asyncio.Task] = None  # Referencia al worker de agregación
+        self._aggregation_worker_running: bool = False  # Flag de control para el worker
         
         if config_path:
             self.load_config(config_path) # If there's a global engine config
@@ -940,7 +945,13 @@ class SimulationEngine:
     # continuous worker model. The engine itself can be "started" or "stopped".
     async def start_engine_main_loop(self):
         if self.status != "running":
-            asyncio.create_task(self.run_continuous_simulation_loop())
+            self.status = "running"
+            if not self._main_loop_task or self._main_loop_task.done():
+                self._main_loop_task = asyncio.create_task(self.run_continuous_simulation_loop())
+            # Iniciar el worker de agregación si no está corriendo
+            if not self._aggregation_worker_task or self._aggregation_worker_task.done():
+                self._aggregation_worker_running = True
+                self._aggregation_worker_task = asyncio.create_task(self.start_aggregation_worker(60))
         else:
             self.logger.info("Engine main loop is already running.")
 
@@ -950,8 +961,136 @@ class SimulationEngine:
         self.logger.info("Telemetry queue set for SimulationEngine.")
 
     async def stop_engine_main_loop(self):
-        self.logger.info("Stopping engine main loop...")
+        self.logger.info("Stopping engine main loop and aggregation worker...")
         self.status = "stopped"
+        # Detener el worker de agregación
+        self._aggregation_worker_running = False
+        if self._aggregation_worker_task:
+            await self._aggregation_worker_task
+            self._aggregation_worker_task = None
+        # Esperar a que la tarea principal termine si existe
+        if self._main_loop_task:
+            await self._main_loop_task
+            self._main_loop_task = None
         # if self.scheduler.is_running_in_background:
         #     self.scheduler.stop()
         # Add any other cleanup needed
+
+    async def start_aggregation_worker(self, interval_seconds: int = 60):
+        """
+        Worker asíncrono que cada 'interval_seconds' calcula y guarda valores agregados
+        (consumo energético, KPIs, etc.) en la tabla AggregatedReading.
+        """
+        self.logger.info(f"Aggregation worker started (interval: {interval_seconds}s)")
+        while self._aggregation_worker_running:
+            try:
+                await self.aggregate_and_store_all(interval_seconds)
+            except Exception as e:
+                self.logger.error(f"Error in aggregation worker: {e}")
+            await asyncio.sleep(interval_seconds)
+        self.logger.info("Aggregation worker stopped.")
+
+    async def aggregate_and_store_all(self, period_seconds: int):
+        """
+        Calcula y guarda los valores agregados de consumo y KPIs para edificio, piso, habitación y dispositivo.
+        """
+        db = self._get_db()
+        now = datetime.now(timezone.utc)
+        start_time = now - timedelta(seconds=period_seconds)
+        try:
+            # --- Agregación por edificio ---
+            buildings = db.query(Building).all()
+            for building in buildings:
+                device_ids = [d.id for d in db.query(Device).join(Room).join(Floor).filter(Floor.building_id == building.id).all()]
+                if not device_ids:
+                    continue
+                total_consumption = db.query(func.sum(SensorReading.value)).filter(
+                    SensorReading.device_id.in_(device_ids),
+                    SensorReading.timestamp >= start_time,
+                    SensorReading.timestamp < now,
+                    cast(SensorReading.extra_data['key'], String) == "power_consumption"
+                ).scalar() or 0.0
+                agg = AggregatedReading(
+                    entity_type="building",
+                    entity_id=building.id,
+                    timestamp=now,
+                    key="power_consumption",
+                    value=total_consumption,
+                    unit="kWh",
+                    period_seconds=period_seconds,
+                    extra_data=None
+                )
+                db.add(agg)
+            # --- Agregación por piso ---
+            floors = db.query(Floor).all()
+            for floor in floors:
+                device_ids = [d.id for d in db.query(Device).join(Room).filter(Room.floor_id == floor.id).all()]
+                if not device_ids:
+                    continue
+                total_consumption = db.query(func.sum(SensorReading.value)).filter(
+                    SensorReading.device_id.in_(device_ids),
+                    SensorReading.timestamp >= start_time,
+                    SensorReading.timestamp < now,
+                    cast(SensorReading.extra_data['key'], String) == "power_consumption"
+                ).scalar() or 0.0
+                agg = AggregatedReading(
+                    entity_type="floor",
+                    entity_id=floor.id,
+                    timestamp=now,
+                    key="power_consumption",
+                    value=total_consumption,
+                    unit="kWh",
+                    period_seconds=period_seconds,
+                    extra_data=None
+                )
+                db.add(agg)
+            # --- Agregación por habitación ---
+            rooms = db.query(Room).all()
+            for room in rooms:
+                device_ids = [d.id for d in db.query(Device).filter(Device.room_id == room.id).all()]
+                if not device_ids:
+                    continue
+                total_consumption = db.query(func.sum(SensorReading.value)).filter(
+                    SensorReading.device_id.in_(device_ids),
+                    SensorReading.timestamp >= start_time,
+                    SensorReading.timestamp < now,
+                    cast(SensorReading.extra_data['key'], String) == "power_consumption"
+                ).scalar() or 0.0
+                agg = AggregatedReading(
+                    entity_type="room",
+                    entity_id=room.id,
+                    timestamp=now,
+                    key="power_consumption",
+                    value=total_consumption,
+                    unit="kWh",
+                    period_seconds=period_seconds,
+                    extra_data=None
+                )
+                db.add(agg)
+            # --- Agregación por dispositivo ---
+            devices = db.query(Device).all()
+            for device in devices:
+                total_consumption = db.query(func.sum(SensorReading.value)).filter(
+                    SensorReading.device_id == device.id,
+                    SensorReading.timestamp >= start_time,
+                    SensorReading.timestamp < now,
+                    cast(SensorReading.extra_data['key'], String) == "power_consumption"
+                ).scalar() or 0.0
+                agg = AggregatedReading(
+                    entity_type="device",
+                    entity_id=device.id,
+                    timestamp=now,
+                    key="power_consumption",
+                    value=total_consumption,
+                    unit="kWh",
+                    period_seconds=period_seconds,
+                    extra_data=None
+                )
+                db.add(agg)
+            db.commit()
+            self.logger.info(f"Aggregated readings stored for period {period_seconds}s at {now}")
+        except Exception as e:
+            db.rollback()
+            self.logger.error(f"Error in aggregate_and_store_all: {e}")
+        finally:
+            db.close()

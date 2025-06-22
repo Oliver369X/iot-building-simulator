@@ -1,45 +1,54 @@
-from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect, Query, Depends
+from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect, Query, Depends, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, List, Any
 from datetime import datetime
 import logging
-import asyncio # Keep for potential future async operations in engine
-from sqlalchemy.orm import Session # Added for DB session type hinting
+import asyncio
+from sqlalchemy.orm import Session
 
-# Updated Pydantic models from validators.py
 from . import validators as api_validators
-# Simulation Engine
 from ..simulator.engine import SimulationEngine, SimulationError
-# Database session
-from ..database.connection import SessionLocal, get_db # get_db might be used for other utility endpoints if any
-from ..database import models as db_models # For response models if needed, and type hinting
+from ..database.connection import SessionLocal, get_db
+from ..database import models as db_models
+from ..database.models import AggregatedReading
+
+# Importar los routers de las rutas
+from .routes import simulation as simulation_router_module
+from .routes import templates as templates_router_module # Assuming you have a templates router
 
 logger = logging.getLogger(__name__)
 
-# Global simulation engine instance
+# Instancia global del motor de simulación
 simulation_engine: Optional[SimulationEngine] = None
 
 app = FastAPI(title="IoT Building Simulator API", version="1.0.0")
 
 # --- Application Lifecycle ---
 @app.on_event("startup")
-async def startup_event(is_testing: bool = False): # Added is_testing parameter
+async def startup_event():
     global simulation_engine
     logger.info("Application startup: Initializing Simulation Engine...")
     simulation_engine = SimulationEngine(db_session_local=SessionLocal)
-    simulation_engine.setup_simulation_events() # Configure recurring tasks
-    if not is_testing: # Only start continuous loop if not in testing mode
-        asyncio.create_task(simulation_engine.start_engine_main_loop())
-        logger.info("Simulation Engine initialized and continuous loop started.")
-    else:
-        logger.info("Simulation Engine initialized for testing (continuous loop not started).")
+    
+    # Cola para eventos de telemetría en tiempo real
+    telemetry_queue: asyncio.Queue = asyncio.Queue()
+    simulation_engine.set_telemetry_queue(telemetry_queue) # Pass the queue to the engine
+    
+    simulation_engine.setup_simulation_events()  # Configure recurring tasks
+    
+    # Iniciar el worker de agregación en segundo plano
+    asyncio.create_task(simulation_engine.start_aggregation_worker(60)) # Start aggregation worker
+    
+    # Guardar la instancia global en app.state
+    app.state.simulation_engine = simulation_engine
+    logger.info("Simulation Engine initialized and stored in app.state (NOT started by default). Use the /simulation/start endpoint to start.")
 
 @app.on_event("shutdown")
 async def shutdown_event():
     global simulation_engine
     if simulation_engine:
         logger.info("Application shutdown: Stopping Simulation Engine...")
-        # await simulation_engine.stop_engine_main_loop() # If it has a stoppable loop
+        await simulation_engine.stop_engine_main_loop() # Ensure the main loop is stopped
         logger.info("Simulation Engine stopped.")
 
 # --- CORS Middleware ---
@@ -54,7 +63,25 @@ app.add_middleware(
 # --- API Endpoints (Prefix: /api/v1) ---
 API_PREFIX = "/api/v1"
 
-# --- Gestión de Infraestructura ---
+# Incluir los routers de las rutas
+# Se pasa la instancia global de simulation_engine a los routers
+# Esto requiere que los endpoints en simulation.py acepten simulation_engine como dependencia
+# o que accedan a la variable global. Para simplificar, haremos que accedan a la global.
+# Sin embargo, la inyección de dependencia es una mejor práctica.
+# Por ahora, ajustaremos simulation.py para que use la global.
+
+# Importar el router de simulación después de definir simulation_engine
+# para que pueda acceder a la instancia global.
+# Alternativa: usar Depends(get_simulation_engine) en cada endpoint.
+# Para este caso, dado que simulation_engine es global y se inicializa en startup,
+# podemos hacer que los routers lo importen directamente.
+
+# Registrar los routers
+app.include_router(simulation_router_module.router, prefix=API_PREFIX, tags=["Simulation"])
+app.include_router(templates_router_module.router, prefix=API_PREFIX, tags=["Templates"])
+
+
+# --- Gestión de Infraestructura (Endpoints existentes, se mantienen) ---
 
 # Edificios
 @app.post(
@@ -66,11 +93,11 @@ API_PREFIX = "/api/v1"
     description="Crea un nuevo edificio en el sistema con el nombre, dirección y geolocalización proporcionados."
 )
 async def create_building_endpoint(building_data: api_validators.BuildingCreate):
+    global simulation_engine # Access global instance
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
         created_building_db_model = simulation_engine.create_building(building_data)
-        # Pydantic's BuildingRead model with orm_mode=True will handle conversion
         return api_validators.BuildingRead.from_orm(created_building_db_model)
     except SimulationError as e:
         logger.error(f"Error creating building: {e}")
@@ -87,6 +114,7 @@ async def create_building_endpoint(building_data: api_validators.BuildingCreate)
     description="Recupera los detalles de un edificio específico usando su ID único."
 )
 async def get_building_endpoint(building_id: str):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -96,11 +124,11 @@ async def get_building_endpoint(building_id: str):
             raise HTTPException(status_code=404, detail=f"Building with id {building_id} not found")
         
         return api_validators.BuildingRead.from_orm(building_db_model)
-    except HTTPException as http_exc: # Re-raise HTTPExceptions to preserve status code
+    except HTTPException as http_exc:
         raise http_exc
     except Exception as e:
-        logger.error(f"Unexpected error getting building {building_id}: {e}") # Changed log message
-        raise HTTPException(status_code=500, detail="Internal server error while retrieving building") # Changed detail
+        logger.error(f"Unexpected error getting building {building_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error while retrieving building")
 
 @app.get(
     f"{API_PREFIX}/buildings",
@@ -110,12 +138,11 @@ async def get_building_endpoint(building_id: str):
     description="Recupera una lista de todos los edificios en el sistema, con paginación opcional usando skip y limit."
 )
 async def list_buildings_endpoint(skip: int = 0, limit: int = 100):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
         buildings_db = simulation_engine.get_all_buildings(skip=skip, limit=limit)
-        # Pydantic will automatically convert the list of DBBuilding objects
-        # to a list of BuildingRead objects if orm_mode=True is set in BuildingRead.Config
         return buildings_db
     except Exception as e:
         logger.error(f"Error listing buildings: {e}")
@@ -129,6 +156,7 @@ async def list_buildings_endpoint(skip: int = 0, limit: int = 100):
     description="Actualiza los detalles de un edificio existente identificado por su ID. Solo se actualizarán los campos proporcionados."
 )
 async def update_building_endpoint(building_id: str, building_data: api_validators.BuildingUpdate):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -136,10 +164,10 @@ async def update_building_endpoint(building_id: str, building_data: api_validato
         if not updated_building_db_model:
             raise HTTPException(status_code=404, detail=f"Building with id {building_id} not found")
         return api_validators.BuildingRead.from_orm(updated_building_db_model)
-    except SimulationError as e: # Catch specific errors from the engine if any are defined for update
+    except SimulationError as e:
         logger.error(f"Error updating building {building_id}: {e}")
-        raise HTTPException(status_code=400, detail=str(e)) # Or appropriate status code
-    except HTTPException as http_exc: # Re-raise HTTPExceptions to preserve status code
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException as http_exc:
         raise http_exc
     except Exception as e:
         logger.error(f"Unexpected error updating building {building_id}: {e}")
@@ -147,26 +175,24 @@ async def update_building_endpoint(building_id: str, building_data: api_validato
 
 @app.delete(
     f"{API_PREFIX}/buildings/{{building_id}}",
-    status_code=204, # No content to return on successful delete
+    status_code=204,
     tags=["Buildings"],
     summary="Eliminar un edificio por ID",
     description="Elimina un edificio y toda su jerarquía (pisos, habitaciones, dispositivos) usando su ID único."
 )
 async def delete_building_endpoint(building_id: str):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
         success = simulation_engine.delete_building(building_id)
         if not success:
-            # This case implies the building was not found by the engine's delete method
             raise HTTPException(status_code=404, detail=f"Building with id {building_id} not found")
-        # No content to return, FastAPI handles the 204 status code
-        return None # Or return Response(status_code=204)
-    except HTTPException as http_exc: # Re-raise HTTPExceptions to preserve status code
+        return None
+    except HTTPException as http_exc:
         raise http_exc
-    except SimulationError as e: # Catch specific errors from the engine
+    except SimulationError as e:
         logger.error(f"Error deleting building {building_id}: {e}")
-        # Decide on appropriate status code, e.g., 500 if it's an unexpected delete failure
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         logger.error(f"Unexpected error deleting building {building_id}: {e}")
@@ -184,8 +210,9 @@ async def delete_building_endpoint(building_id: str):
 async def set_building_simulation_status_endpoint(
     building_id: str, 
     status: bool = Query(..., description="True para activar, False para desactivar la simulación"),
-    db: Session = Depends(get_db) # Inject DB session
+    db: Session = Depends(get_db)
 ):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -212,8 +239,9 @@ async def set_building_simulation_status_endpoint(
 async def set_floor_simulation_status_endpoint(
     floor_id: str, 
     status: bool = Query(..., description="True para activar, False para desactivar la simulación"),
-    db: Session = Depends(get_db) # Inject DB session
+    db: Session = Depends(get_db)
 ):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -240,8 +268,9 @@ async def set_floor_simulation_status_endpoint(
 async def set_room_simulation_status_endpoint(
     room_id: str, 
     status: bool = Query(..., description="True para activar, False para desactivar la simulación"),
-    db: Session = Depends(get_db) # Inject DB session
+    db: Session = Depends(get_db)
 ):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -269,6 +298,7 @@ async def set_room_simulation_status_endpoint(
     description="Crea un nuevo piso dentro del edificio especificado."
 )
 async def create_floor_endpoint(building_id: str, floor_data: api_validators.FloorCreate):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -296,6 +326,7 @@ async def create_floor_endpoint(building_id: str, floor_data: api_validators.Flo
     description="Recupera una lista de todos los pisos para un edificio dado."
 )
 async def list_floors_for_building_endpoint(building_id: str, skip: int = 0, limit: int = 100):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -305,7 +336,7 @@ async def list_floors_for_building_endpoint(building_id: str, skip: int = 0, lim
             raise HTTPException(status_code=404, detail=f"Building with id {building_id} not found")
 
         floors_db = simulation_engine.get_floors_by_building_id(building_id, skip=skip, limit=limit)
-        return floors_db # Pydantic will handle conversion
+        return floors_db
     except HTTPException as http_exc:
         raise http_exc
     except Exception as e:
@@ -320,6 +351,7 @@ async def list_floors_for_building_endpoint(building_id: str, skip: int = 0, lim
     description="Recupera los detalles de un piso específico usando su ID único."
 )
 async def get_floor_endpoint(floor_id: str):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -341,6 +373,7 @@ async def get_floor_endpoint(floor_id: str):
     description="Actualiza los detalles de un piso existente identificado por su ID."
 )
 async def update_floor_endpoint(floor_id: str, floor_data: api_validators.FloorUpdate):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -365,6 +398,7 @@ async def update_floor_endpoint(floor_id: str, floor_data: api_validators.FloorU
     description="Elimina un piso y sus habitaciones y dispositivos asociados usando su ID único."
 )
 async def delete_floor_endpoint(floor_id: str):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -392,6 +426,7 @@ async def delete_floor_endpoint(floor_id: str):
     description="Crea una nueva habitación dentro del piso especificado."
 )
 async def create_room_endpoint(floor_id: str, room_data: api_validators.RoomCreate):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -419,6 +454,7 @@ async def create_room_endpoint(floor_id: str, room_data: api_validators.RoomCrea
     description="Recupera una lista de todas las habitaciones para un piso dado."
 )
 async def list_rooms_for_floor_endpoint(floor_id: str, skip: int = 0, limit: int = 100):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -428,7 +464,7 @@ async def list_rooms_for_floor_endpoint(floor_id: str, skip: int = 0, limit: int
             raise HTTPException(status_code=404, detail=f"Floor with id {floor_id} not found")
 
         rooms_db = simulation_engine.get_rooms_by_floor_id(floor_id, skip=skip, limit=limit)
-        return rooms_db # Pydantic will handle conversion
+        return rooms_db
     except HTTPException as http_exc:
         raise http_exc
     except Exception as e:
@@ -443,6 +479,7 @@ async def list_rooms_for_floor_endpoint(floor_id: str, skip: int = 0, limit: int
     description="Recupera los detalles de una habitación específica usando su ID único."
 )
 async def get_room_endpoint(room_id: str):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -464,6 +501,7 @@ async def get_room_endpoint(room_id: str):
     description="Actualiza los detalles de una habitación existente identificada por su ID."
 )
 async def update_room_endpoint(room_id: str, room_data: api_validators.RoomUpdate):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -488,6 +526,7 @@ async def update_room_endpoint(room_id: str, room_data: api_validators.RoomUpdat
     description="Elimina una habitación y sus dispositivos asociados usando su ID único."
 )
 async def delete_room_endpoint(room_id: str):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -515,6 +554,7 @@ async def delete_room_endpoint(room_id: str):
     description="Crea un nuevo dispositivo dentro de la habitación especificada."
 )
 async def create_device_endpoint(room_id: str, device_data: api_validators.DeviceCreate):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -547,6 +587,7 @@ async def create_device_endpoint(room_id: str, device_data: api_validators.Devic
     description="Recupera una lista de todos los dispositivos para una habitación dada."
 )
 async def list_devices_for_room_endpoint(room_id: str, skip: int = 0, limit: int = 100):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -556,7 +597,7 @@ async def list_devices_for_room_endpoint(room_id: str, skip: int = 0, limit: int
             raise HTTPException(status_code=404, detail=f"Room with id {room_id} not found")
 
         devices_db = simulation_engine.get_devices_by_room_id(room_id, skip=skip, limit=limit)
-        return devices_db # Pydantic will handle conversion
+        return devices_db
     except HTTPException as http_exc:
         raise http_exc
     except Exception as e:
@@ -571,6 +612,7 @@ async def list_devices_for_room_endpoint(room_id: str, skip: int = 0, limit: int
     description="Recupera los detalles de un dispositivo específico usando su ID único."
 )
 async def get_device_endpoint(device_id: str):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -592,6 +634,7 @@ async def get_device_endpoint(device_id: str):
     description="Actualiza los detalles de un dispositivo existente identificado por su ID. Puede usarse para cambiar el nombre, la ubicación (room_id), el estado, etc."
 )
 async def update_device_endpoint(device_id: str, device_data: api_validators.DeviceUpdate):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -628,6 +671,7 @@ async def update_device_endpoint(device_id: str, device_data: api_validators.Dev
     description="Elimina un dispositivo usando su ID único."
 )
 async def delete_device_endpoint(device_id: str):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -655,6 +699,7 @@ async def delete_device_endpoint(device_id: str):
     description="Crea un nuevo tipo de dispositivo que puede ser usado en el sistema."
 )
 async def create_device_type_endpoint(device_type_data: api_validators.DeviceTypeCreate):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -677,6 +722,7 @@ async def create_device_type_endpoint(device_type_data: api_validators.DeviceTyp
     description="Recupera los detalles de un tipo de dispositivo específico usando su ID único."
 )
 async def get_device_type_endpoint(device_type_id: str):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -698,11 +744,12 @@ async def get_device_type_endpoint(device_type_id: str):
     description="Recupera una lista de todos los tipos de dispositivos disponibles en el sistema."
 )
 async def list_device_types_endpoint(skip: int = 0, limit: int = 100):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
         device_types_db = simulation_engine.get_all_device_types(skip=skip, limit=limit)
-        return device_types_db # Pydantic will handle conversion
+        return device_types_db
     except Exception as e:
         logger.error(f"Error listing device types: {e}")
         raise HTTPException(status_code=500, detail="Internal server error while listing device types")
@@ -715,6 +762,7 @@ async def list_device_types_endpoint(skip: int = 0, limit: int = 100):
     description="Actualiza los detalles de un tipo de dispositivo existente identificado por su ID."
 )
 async def update_device_type_endpoint(device_type_id: str, device_type_data: api_validators.DeviceTypeUpdate):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -739,6 +787,7 @@ async def update_device_type_endpoint(device_type_id: str, device_type_data: api
     description="Elimina un tipo de dispositivo usando su ID único. Nota: Esto podría fallar si hay dispositivos usando este tipo actualmente."
 )
 async def delete_device_type_endpoint(device_type_id: str):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -750,9 +799,9 @@ async def delete_device_type_endpoint(device_type_id: str):
         return None
     except HTTPException as http_exc:
         raise http_exc
-    except SimulationError as e: # Specific engine error for constrained deletion
+    except SimulationError as e:
         logger.error(f"Error deleting device type {device_type_id}: {e}")
-        raise HTTPException(status_code=409, detail=str(e)) # 409 Conflict if deletion is blocked
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         logger.error(f"Unexpected error deleting device type {device_type_id}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error while deleting device type")
@@ -768,6 +817,7 @@ async def delete_device_type_endpoint(device_type_id: str):
     description="Crea una nueva tarea programada para el dispositivo especificado."
 )
 async def create_device_schedule_endpoint(device_id: str, schedule_data: api_validators.DeviceScheduleCreate):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -795,6 +845,7 @@ async def create_device_schedule_endpoint(device_id: str, schedule_data: api_val
     description="Recupera una lista de todas las tareas programadas para un dispositivo dado."
 )
 async def list_schedules_for_device_endpoint(device_id: str, skip: int = 0, limit: int = 100):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -804,7 +855,7 @@ async def list_schedules_for_device_endpoint(device_id: str, skip: int = 0, limi
             raise HTTPException(status_code=404, detail=f"Device with id {device_id} not found")
 
         schedules_db = simulation_engine.get_schedules_by_device_id(device_id, skip=skip, limit=limit)
-        return schedules_db # Pydantic will handle conversion
+        return schedules_db
     except HTTPException as http_exc:
         raise http_exc
     except Exception as e:
@@ -812,13 +863,14 @@ async def list_schedules_for_device_endpoint(device_id: str, skip: int = 0, limi
         raise HTTPException(status_code=500, detail="Internal server error while listing device schedules")
 
 @app.get(
-    f"{API_PREFIX}/schedules/{{schedule_id}}", # Generic endpoint to get any schedule by its ID
+    f"{API_PREFIX}/schedules/{{schedule_id}}",
     response_model=api_validators.DeviceScheduleRead,
     tags=["DeviceSchedules"],
     summary="Obtener una programación específica por ID",
     description="Recupera los detalles de una programación específica usando su ID único."
 )
 async def get_schedule_endpoint(schedule_id: str):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -840,6 +892,7 @@ async def get_schedule_endpoint(schedule_id: str):
     description="Actualiza los detalles de una programación existente identificada por su ID."
 )
 async def update_schedule_endpoint(schedule_id: str, schedule_data: api_validators.DeviceScheduleUpdate):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -864,6 +917,7 @@ async def update_schedule_endpoint(schedule_id: str, schedule_data: api_validato
     description="Elimina una programación usando su ID único."
 )
 async def delete_schedule_endpoint(schedule_id: str):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -898,6 +952,7 @@ async def list_alarms_endpoint(
     skip: int = 0,
     limit: int = 100
 ):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -910,7 +965,7 @@ async def list_alarms_endpoint(
             skip=skip,
             limit=limit
         )
-        return alarms_db # Pydantic will handle conversion
+        return alarms_db
     except Exception as e:
         logger.error(f"Error listing alarms: {e}")
         raise HTTPException(status_code=500, detail="Internal server error while listing alarms")
@@ -923,6 +978,7 @@ async def list_alarms_endpoint(
     description="Marca una alarma como reconocida (estado='ACK')."
 )
 async def acknowledge_alarm_endpoint(alarm_id: str):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -932,25 +988,24 @@ async def acknowledge_alarm_endpoint(alarm_id: str):
         return api_validators.AlarmRead.from_orm(acknowledged_alarm_db_model)
     except SimulationError as e:
         logger.error(f"Error acknowledging alarm {alarm_id}: {e}")
-        raise HTTPException(status_code=400, detail=str(e)) # Or 409 Conflict if state transition is invalid
+        raise HTTPException(status_code=400, detail=str(e))
     except HTTPException as http_exc:
         raise http_exc
     except Exception as e:
         logger.error(f"Unexpected error acknowledging alarm {alarm_id}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error while acknowledging alarm")
 
-# TODO: Consider if other Alarm modification endpoints are needed (e.g., resolve, delete - though delete is often avoided for audit)
-
 # --- Control y Simulación ---
 
 @app.post(
     f"{API_PREFIX}/devices/{{device_id}}/actions",
-    response_model=api_validators.DeviceRead, # Returns the updated device state
+    response_model=api_validators.DeviceRead,
     tags=["Device Control"],
     summary="Enviar una acción a un dispositivo",
     description="Envía un comando a un dispositivo para cambiar su estado (ej., encender/apagar, establecer valor). El estado del dispositivo en la base de datos se actualiza inmediatamente."
 )
 async def device_action_endpoint(device_id: str, action_data: api_validators.DeviceAction):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -961,7 +1016,6 @@ async def device_action_endpoint(device_id: str, action_data: api_validators.Dev
 
         updated_device_db_model = simulation_engine.execute_device_action(device_id, action_data)
         if not updated_device_db_model:
-            # This might occur if the action is invalid or the device state update fails in a specific way
             raise HTTPException(status_code=400, detail="Failed to execute action or update device state")
         return api_validators.DeviceRead.from_orm(updated_device_db_model)
     except SimulationError as e:
@@ -987,8 +1041,9 @@ async def get_device_telemetry_endpoint(
     key: Optional[str] = Query(None, description="Clave de telemetría específica a recuperar (ej., 'temperatura')"),
     start_time: Optional[datetime] = Query(None, description="Inicio del rango de tiempo para los datos de telemetría"),
     end_time: Optional[datetime] = Query(None, description="Fin del rango de tiempo para los datos de telemetría"),
-    aggregation: Optional[str] = Query(None, description="Intervalo de agregación (ej., '1m', '1h'). Aún no implementado completamente en el motor.") # TODO: Engine support for aggregation
+    aggregation: Optional[str] = Query(None, description="Intervalo de agregación (ej., '1m', '1h'). Aún no implementado completamente en el motor.")
 ):
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
@@ -997,8 +1052,6 @@ async def get_device_telemetry_endpoint(
         if not device:
             raise HTTPException(status_code=404, detail=f"Device with id {device_id} not found")
 
-        # The simulation_engine will need a method to fetch telemetry.
-        # This method should ideally interact with the TimescaleDB/telemetry store.
         telemetry_data = simulation_engine.get_device_telemetry(
             device_id=device_id,
             key=key,
@@ -1006,32 +1059,18 @@ async def get_device_telemetry_endpoint(
             end_time=end_time,
             aggregation=aggregation
         )
-        # Assuming telemetry_data is a list of dicts or objects that can be converted to TelemetryDataPoint
-        # For now, returning a placeholder if engine method not fully implemented.
-        # This part needs careful implementation in the engine.
         
-        # Placeholder:
-        # data_points = [
-        #     api_validators.TelemetryDataPoint(timestamp=datetime.now(), value=22.5, key="temperature"),
-        #     api_validators.TelemetryDataPoint(timestamp=datetime.now() - timedelta(minutes=1), value=22.7, key="temperature")
-        # ]
-        # return api_validators.TelemetryResponse(device_id=device_id, data_points=data_points, aggregation_interval=aggregation)
-
-        if not isinstance(telemetry_data, list): # Basic check, engine should return list of data points
+        if not isinstance(telemetry_data, list):
              logger.warning(f"Telemetry data for device {device_id} from engine is not a list: {telemetry_data}")
-             # Depending on engine's behavior, might return empty or raise error
-             # For now, assume it's a list of Pydantic-compatible objects or dicts
-             # If the engine returns raw DB objects, they need to be converted.
-             # If the engine already returns list of TelemetryDataPoint, this is fine.
-             pass # Let Pydantic try to validate
+             pass
 
         return api_validators.TelemetryResponse(
             device_id=device_id,
-            data_points=telemetry_data, # Pydantic will validate each item
+            data_points=telemetry_data,
             aggregation_interval=aggregation
         )
 
-    except SimulationError as e: # Specific error from telemetry fetching
+    except SimulationError as e:
         logger.error(f"Error fetching telemetry for device {device_id}: {e}")
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException as http_exc:
@@ -1040,13 +1079,11 @@ async def get_device_telemetry_endpoint(
         logger.error(f"Unexpected error fetching telemetry for device {device_id}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error while fetching telemetry")
 
-# Define a Pydantic model for the KPI dashboard response
-class KPIDashboardResponse(api_validators.BaseModel): # Use BaseModel from validators for consistency
+class KPIDashboardResponse(api_validators.BaseModel):
     total_consumption_live: Optional[float] = None
     active_alarms_count: Optional[int] = None
-    average_temperature_building: Optional[float] = None # Example KPI
-    devices_on_count: Optional[int] = None # Example KPI
-    # ... other KPIs as needed
+    average_temperature_building: Optional[float] = None
+    devices_on_count: Optional[int] = None
 
 @app.get(
     f"{API_PREFIX}/kpi/dashboard",
@@ -1056,49 +1093,39 @@ class KPIDashboardResponse(api_validators.BaseModel): # Use BaseModel from valid
     description="Recupera un conjunto de Indicadores Clave de Rendimiento (KPIs) para mostrar en un panel de control."
 )
 async def get_kpi_dashboard_endpoint():
+    global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
-        # The simulation_engine will need a method to calculate/retrieve current KPIs.
         kpi_data = simulation_engine.get_kpi_dashboard_data()
-
-        # Assuming kpi_data is a dictionary matching KPIDashboardResponse fields
-        # Example: kpi_data = {"total_consumption_live": 5.2, "active_alarms_count": 12}
         return KPIDashboardResponse(**kpi_data)
 
-    except SimulationError as e: # Specific error from KPI calculation
+    except SimulationError as e:
         logger.error(f"Error fetching KPI dashboard data: {e}")
         raise HTTPException(status_code=500, detail=f"Error calculating KPIs: {str(e)}")
     except Exception as e:
         logger.error(f"Unexpected error fetching KPI dashboard data: {e}")
         raise HTTPException(status_code=500, detail="Internal server error while fetching KPI data")
-# POST /devices/{id}/actions
-# GET /devices/{id}/schedules
-# POST /devices/{id}/schedules
-# PUT /schedules/{id}
-# DELETE /schedules/{id}
-
-# --- Datos y Visualización ---
-# GET /telemetry/device/{id}
-# GET /kpi/dashboard
-# GET /alarms
-# POST /alarms/{id}/ack
-
 
 # --- WebSocket para Telemetría en Tiempo Real ---
 # El motor de simulación publicará eventos de telemetría a una cola,
 # y este WebSocket los consumirá y enviará a los clientes.
 
-# Cola para eventos de telemetría en tiempo real
-telemetry_queue: asyncio.Queue = asyncio.Queue()
+# Cola para eventos de telemetría en tiempo real (se inicializa en startup_event)
+# telemetry_queue: asyncio.Queue = asyncio.Queue() # Removed, now initialized in startup
 
 @app.websocket("/ws/telemetry")
 async def websocket_telemetry_endpoint(websocket: WebSocket):
     await websocket.accept()
+    # Acceder a la cola de telemetría desde la instancia global del motor de simulación
+    global simulation_engine
+    if not simulation_engine or not simulation_engine._telemetry_queue:
+        logger.error("Telemetry queue not initialized in simulation engine.")
+        raise HTTPException(status_code=503, detail="Telemetry service not available")
+
     try:
         while True:
-            # Esperar por nuevos datos de telemetría del motor de simulación
-            telemetry_data = await telemetry_queue.get()
+            telemetry_data = await simulation_engine._telemetry_queue.get()
             await websocket.send_json(telemetry_data)
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected.")
@@ -1106,26 +1133,132 @@ async def websocket_telemetry_endpoint(websocket: WebSocket):
         logger.error(f"WebSocket error: {e}")
     finally:
         # Asegurarse de que la tarea de la cola se marque como hecha
-        telemetry_queue.task_done()
+        # telemetry_queue.task_done() # This should be handled by the engine if it manages the queue
         await websocket.close()
 
-# Modificar el evento de inicio para pasar la cola al motor de simulación
-@app.on_event("startup")
-async def startup_event():
-    global simulation_engine
-    logger.info("Application startup: Initializing Simulation Engine...")
-    simulation_engine = SimulationEngine(db_session_local=SessionLocal)
-    simulation_engine.set_telemetry_queue(telemetry_queue) # Pass the queue to the engine
-    simulation_engine.setup_simulation_events() # Configure recurring tasks
-    asyncio.create_task(simulation_engine.start_engine_main_loop())
-    logger.info("Simulation Engine initialized and continuous loop started.")
+# --- Agregaciones de Consumo (Endpoints existentes, se mantienen) ---
 
-# --- Old Endpoints (to be removed or refactored based on SimulationManager) ---
-# Estos endpoints ya no son necesarios o han sido reemplazados por los nuevos CRUD y control de simulación.
-# @app.get("/buildings") # Example, will be replaced by GET /api/v1/buildings
-# async def get_buildings_old():
-#     pass
+@app.get(
+    f"{API_PREFIX}/consumption/building/{{building_id}}",
+    tags=["Aggregated Consumption"],
+    summary="Consumo energético agregado por edificio",
+    description="Devuelve los valores agregados de consumo energético para un edificio en un rango de fechas."
+)
+async def get_building_aggregated_consumption(
+    building_id: str,
+    start_time: Optional[datetime] = Query(None, description="Inicio del rango de fechas"),
+    end_time: Optional[datetime] = Query(None, description="Fin del rango de fechas"),
+    period_seconds: Optional[int] = Query(None, description="Periodo de agregación en segundos (ej: 60 para 1 min)")
+):
+    db = next(get_db())
+    query = db.query(AggregatedReading).filter_by(entity_type="building", entity_id=building_id, key="power_consumption")
+    if start_time:
+        query = query.filter(AggregatedReading.timestamp >= start_time)
+    if end_time:
+        query = query.filter(AggregatedReading.timestamp < end_time)
+    if period_seconds:
+        query = query.filter(AggregatedReading.period_seconds == period_seconds)
+    results = query.order_by(AggregatedReading.timestamp).all()
+    return [r.to_dict() for r in results]
 
-# @app.post("/simulation/start")
-# async def start_simulation_old(params: api_validators.SimulationStart): # Old validator
-#     pass
+@app.get(
+    f"{API_PREFIX}/consumption/floor/{{floor_id}}",
+    tags=["Aggregated Consumption"],
+    summary="Consumo energético agregado por piso",
+    description="Devuelve los valores agregados de consumo energético para un piso en un rango de fechas."
+)
+async def get_floor_aggregated_consumption(
+    floor_id: str,
+    start_time: Optional[datetime] = Query(None),
+    end_time: Optional[datetime] = Query(None),
+    period_seconds: Optional[int] = Query(None)
+):
+    db = next(get_db())
+    query = db.query(AggregatedReading).filter_by(entity_type="floor", entity_id=floor_id, key="power_consumption")
+    if start_time:
+        query = query.filter(AggregatedReading.timestamp >= start_time)
+    if end_time:
+        query = query.filter(AggregatedReading.timestamp < end_time)
+    if period_seconds:
+        query = query.filter(AggregatedReading.period_seconds == period_seconds)
+    results = query.order_by(AggregatedReading.timestamp).all()
+    return [r.to_dict() for r in results]
+
+@app.get(
+    f"{API_PREFIX}/consumption/room/{{room_id}}",
+    tags=["Aggregated Consumption"],
+    summary="Consumo energético agregado por habitación",
+    description="Devuelve los valores agregados de consumo energético para una habitación en un rango de fechas."
+)
+async def get_room_aggregated_consumption(
+    room_id: str,
+    start_time: Optional[datetime] = Query(None),
+    end_time: Optional[datetime] = Query(None),
+    period_seconds: Optional[int] = Query(None)
+):
+    db = next(get_db())
+    query = db.query(AggregatedReading).filter_by(entity_type="room", entity_id=room_id, key="power_consumption")
+    if start_time:
+        query = query.filter(AggregatedReading.timestamp >= start_time)
+    if end_time:
+        query = query.filter(AggregatedReading.timestamp < end_time)
+    if period_seconds:
+        query = query.filter(AggregatedReading.period_seconds == period_seconds)
+    results = query.order_by(AggregatedReading.timestamp).all()
+    return [r.to_dict() for r in results]
+
+@app.get(
+    f"{API_PREFIX}/consumption/device/{{device_id}}",
+    tags=["Aggregated Consumption"],
+    summary="Consumo energético agregado por dispositivo",
+    description="Devuelve los valores agregados de consumo energético para un dispositivo en un rango de fechas."
+)
+async def get_device_aggregated_consumption(
+    device_id: str,
+    start_time: Optional[datetime] = Query(None),
+    end_time: Optional[datetime] = Query(None),
+    period_seconds: Optional[int] = Query(None)
+):
+    db = next(get_db())
+    query = db.query(AggregatedReading).filter_by(entity_type="device", entity_id=device_id, key="power_consumption")
+    if start_time:
+        query = query.filter(AggregatedReading.timestamp >= start_time)
+    if end_time:
+        query = query.filter(AggregatedReading.timestamp < end_time)
+    if period_seconds:
+        query = query.filter(AggregatedReading.period_seconds == period_seconds)
+    results = query.order_by(AggregatedReading.timestamp).all()
+    return [r.to_dict() for r in results]
+
+# --- Endpoint para detener la simulación global ---
+@app.post(f"{API_PREFIX}/simulation/stop", tags=["Simulation Control"], summary="Detener la simulación global")
+async def stop_simulation_endpoint(request: Request):
+    simulation_engine = request.app.state.simulation_engine
+    if not simulation_engine:
+        raise HTTPException(status_code=503, detail="Simulation engine not available")
+    if hasattr(simulation_engine, "status") and simulation_engine.status != "running":
+        return {"message": "Simulation already stopped"}
+    await simulation_engine.stop_engine_main_loop()
+    return {"message": "Simulation stopped"}
+
+# --- Endpoint para consultar el estado global de la simulación ---
+@app.get(f"{API_PREFIX}/simulation/status", tags=["Simulation Control"], summary="Consultar el estado global de la simulación")
+async def simulation_status_endpoint(request: Request):
+    simulation_engine = request.app.state.simulation_engine
+    if not simulation_engine:
+        raise HTTPException(status_code=503, detail="Simulation engine not available")
+    status = getattr(simulation_engine, "status", "unknown")
+    # Consultar entidades principales
+    db = SessionLocal()
+    try:
+        buildings = db.query(db_models.Building).all()
+        floors = db.query(db_models.Floor).all()
+        rooms = db.query(db_models.Room).all()
+        return {
+            "engine_status": status,
+            "buildings": [{"id": b.id, "name": b.name, "is_simulating": b.is_simulating} for b in buildings],
+            "floors": [{"id": f.id, "number": f.floor_number, "is_simulating": f.is_simulating} for f in floors],
+            "rooms": [{"id": r.id, "name": r.name, "is_simulating": r.is_simulating} for r in rooms],
+        }
+    finally:
+        db.close()
