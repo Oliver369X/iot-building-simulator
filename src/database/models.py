@@ -36,27 +36,32 @@ class Building(MixinAsDict, Base):
     is_simulating = Column(Boolean, default=False) # New field for simulation control
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    floors = relationship("Floor", back_populates="building")
 
 class Floor(MixinAsDict, Base):
     __tablename__ = 'floors'
     
     id = Column(String, primary_key=True) # Assuming UUIDs are stored as strings
-    building_id = Column(String, ForeignKey('buildings.id', ondelete='CASCADE'))
+    building_id = Column(String, ForeignKey('buildings.id', ondelete='CASCADE'), nullable=False)
     floor_number = Column(Integer, nullable=False)
     plan_url = Column(Text, nullable=True)
     is_simulating = Column(Boolean, default=False) # New field for simulation control
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    building = relationship("Building", back_populates="floors")
+    rooms = relationship("Room", back_populates="floor")
 
 class Room(MixinAsDict, Base):
     __tablename__ = 'rooms'
     
     id = Column(String, primary_key=True) # Assuming UUIDs are stored as strings
-    floor_id = Column(String, ForeignKey('floors.id', ondelete='CASCADE'))
+    floor_id = Column(String, ForeignKey('floors.id', ondelete='CASCADE'), nullable=False)
     name = Column(Text, nullable=False) # Changed from room_number
     is_simulating = Column(Boolean, default=False) # New field for simulation control
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    floor = relationship("Floor", back_populates="rooms")
+    devices = relationship("Device", back_populates="room")
 
 # Dispositivos y Configuración
 class DeviceType(MixinAsDict, Base):
@@ -74,11 +79,12 @@ class Device(MixinAsDict, Base):
     id = Column(String, primary_key=True) # Assuming UUIDs are stored as strings
     name = Column(Text, nullable=False)
     device_type_id = Column(String, ForeignKey('device_types.id'))
-    room_id = Column(String, ForeignKey('rooms.id', ondelete='CASCADE'))
+    room_id = Column(String, ForeignKey('rooms.id', ondelete='CASCADE'), nullable=False)
     state = Column(JSONB) # e.g., { "power": "OFF", "brightness": 80, "target_temp": 21 }
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    room = relationship("Room", back_populates="devices")
 
 
 class DeviceSchedule(MixinAsDict, Base):

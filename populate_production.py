@@ -1,10 +1,25 @@
+#!/usr/bin/env python3
+"""
+Script para poblar la base de datos de producción/demo con 2 edificios:
+- Edificio Demo 1: 3 pisos, 5 habitaciones por piso, 4 dispositivos por habitación
+- Edificio Demo 2: 6 pisos, 8 habitaciones por piso, 6 dispositivos por habitación
+"""
+
 import uuid
 import random
 from datetime import datetime
-from src.database.connection import SessionLocal
-from src.database.models import Building, Floor, Room, Device, DeviceType
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from src.database.models import Building, Floor, Room, Device, DeviceType, Base
 
-print("🔧 Configurando conexión a la base de datos...")
+# Configuración de la base de datos (ajusta la URL si es necesario)
+PRODUCTION_DATABASE_URL = "postgresql://iot_simulator_user:njsoSS2LgNFawnH69x84SSiRUwxKGPp3@dpg-d1c6tip5pdvs73ei8b30-a.oregon-postgres.render.com/iot_simulator"
+
+print("🚀 Iniciando población DEMO de base de datos...")
+print(f"🌐 Conectando a: {PRODUCTION_DATABASE_URL[:50]}...")
+
+engine = create_engine(PRODUCTION_DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 db = SessionLocal()
 
 def create_device_types():
@@ -107,7 +122,7 @@ def main():
         print("\n🏢 Creando edificios demo...")
         buildings = []
         buildings.append(create_demo_building(
-            name="Edificio Demo 1",
+            name="Casa Grande 1",
             address="Calle Demo 123",
             floors=3,
             rooms_per_floor=5,
@@ -116,11 +131,11 @@ def main():
             device_type_names=device_type_names
         ))
         buildings.append(create_demo_building(
-            name="Edificio Demo 2",
+            name="Edificio PCT",
             address="Avenida Prueba 456",
-            floors=6,
+            floors=5,
             rooms_per_floor=8,
-            devices_per_room=6,
+            devices_per_room=4,
             device_type_ids=device_type_ids,
             device_type_names=device_type_names
         ))
@@ -143,4 +158,4 @@ def main():
         db.close()
 
 if __name__ == "__main__":
-    main()
+    main() 

@@ -4,12 +4,13 @@ from datetime import datetime
 import asyncio
 import json
 from sqlalchemy.orm import Session
+from sqlalchemy import desc, func
 
 from src.simulator.engine import SimulationEngine
 # from src.database.db_manager import DatabaseManager # Eliminado
 from src.templates.building_templates import BuildingTemplateManager
 from src.database.connection import SessionLocal, get_db
-from src.database.models import Building, Floor, Room, Device
+from src.database.models import Building, Floor, Room, Device, DeviceType, SensorReading
 
 # Importar la instancia global del motor de simulación desde main.py
 # from src.api.main import simulation_engine as global_simulation_engine
@@ -255,3 +256,61 @@ async def websocket_endpoint(websocket: WebSocket, simulation_id: str, request: 
         # La gestión de la cola debe ser más sofisticada si hay múltiples clientes.
         # Por ahora, simplemente cerrar el websocket.
         await websocket.close()
+
+@router.get("/buildings/{building_id}/live_data")
+async def get_live_building_data(
+    building_id: str,
+    limit_per_device: int = 1,  # Por defecto, solo la última lectura por dispositivo
+    db: Session = Depends(get_db)
+):
+    """
+    Devuelve la última lectura de cada dispositivo activo en un edificio.
+    """
+    try:
+        # Obtener los IDs de los dispositivos activos del edificio
+        device_ids = [
+            d.id for d in db.query(Device)
+            .join(Room, Device.room_id == Room.id)
+            .join(Floor, Room.floor_id == Floor.id)
+            .filter(Floor.building_id == building_id)
+            .filter(Device.is_active == True)
+            .all()
+        ]
+        if not device_ids:
+            return []
+
+        # Subconsulta: última lectura por dispositivo
+        subq = (
+            db.query(
+                SensorReading.device_id,
+                func.max(SensorReading.timestamp).label("max_timestamp")
+            )
+            .filter(SensorReading.device_id.in_(device_ids))
+            .group_by(SensorReading.device_id)
+            .subquery()
+        )
+
+        latest_readings = (
+            db.query(SensorReading)
+            .join(
+                subq,
+                (SensorReading.device_id == subq.c.device_id) &
+                (SensorReading.timestamp == subq.c.max_timestamp)
+            )
+            .all()
+        )
+
+        # Formatear la respuesta
+        return [
+            {
+                "device_id": r.device_id,
+                "timestamp": r.timestamp.isoformat().replace("+00:00", "Z"),
+                "key": r.extra_data.get("key") if r.extra_data else None,
+                "value": r.value,
+                "unit": r.unit
+            }
+            for r in latest_readings
+        ]
+    except Exception as e:
+        print(f"Error en get_live_building_data: {e}")
+        raise HTTPException(status_code=500, detail="Error al obtener datos en vivo.")
