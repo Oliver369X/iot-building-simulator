@@ -89,6 +89,7 @@ class FloorRead(FloorCreate):
 
 # --- Building Models ---
 class BuildingCreate(BaseModel):
+    client_id: str = Field(..., description="ID del cliente al que pertenece el edificio")
     name: str
     address: Optional[str] = None
     geolocation: Optional[Dict[str, float]] = Field(None, description='e.g., {"latitude": 40.7128, "longitude": -74.0060}')
@@ -110,6 +111,7 @@ class BuildingUpdate(BaseModel):
     address: Optional[str] = None
     geolocation: Optional[Dict[str, float]] = None
     is_simulating: Optional[bool] = None
+    # client_id no se puede actualizar por seguridad multi-tenancy
 
 # --- Device Control and Scheduling ---
 class DeviceAction(BaseModel):

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect, Query, Depends, BackgroundTasks, Request
+from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect, Query, Depends, BackgroundTasks, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, List, Any
 from datetime import datetime
@@ -76,6 +76,16 @@ API_PREFIX = "/api/v1"
 # Para este caso, dado que simulation_engine es global y se inicializa en startup,
 # podemos hacer que los routers lo importen directamente.
 
+# Middleware para obtener client_id
+async def get_client_id(x_client_id: Optional[str] = Header(None, alias="X-Client-ID")) -> str:
+    """
+    Middleware para obtener el client_id desde el header X-Client-ID.
+    En producción, esto debería venir de un JWT token validado.
+    """
+    if not x_client_id:
+        raise HTTPException(status_code=400, detail="X-Client-ID header is required")
+    return x_client_id
+
 # Registrar los routers
 app.include_router(simulation_router_module.router, prefix=API_PREFIX, tags=["Simulation"])
 app.include_router(templates_router_module.router, prefix=API_PREFIX, tags=["Templates"])
@@ -92,19 +102,23 @@ app.include_router(templates_router_module.router, prefix=API_PREFIX, tags=["Tem
     summary="Crear un nuevo edificio",
     description="Crea un nuevo edificio en el sistema con el nombre, dirección y geolocalización proporcionados."
 )
-async def create_building_endpoint(building_data: api_validators.BuildingCreate):
+async def create_building_endpoint(
+    building_data: api_validators.BuildingCreate,
+    client_id: str = Depends(get_client_id)
+):
     global simulation_engine # Access global instance
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
+        # Asignar el client_id al building_data
+        building_data.client_id = client_id
         created_building_db_model = simulation_engine.create_building(building_data)
-        return api_validators.BuildingRead.from_orm(created_building_db_model)
+        return created_building_db_model
     except SimulationError as e:
-        logger.error(f"Error creating building: {e}")
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Unexpected error creating building: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error while creating building")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get(
     f"{API_PREFIX}/buildings/{{building_id}}",
@@ -113,22 +127,23 @@ async def create_building_endpoint(building_data: api_validators.BuildingCreate)
     summary="Obtener un edificio específico por ID",
     description="Recupera los detalles de un edificio específico usando su ID único."
 )
-async def get_building_endpoint(building_id: str):
+async def get_building_endpoint(
+    building_id: str,
+    client_id: str = Depends(get_client_id)
+):
     global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
-        building_db_model = simulation_engine.get_building_by_id(building_id)
-        if not building_db_model:
-            logger.info(f"Building with id {building_id} not found by engine.")
-            raise HTTPException(status_code=404, detail=f"Building with id {building_id} not found")
-        
-        return api_validators.BuildingRead.from_orm(building_db_model)
-    except HTTPException as http_exc:
-        raise http_exc
+        building = simulation_engine.get_building_by_id(building_id, client_id)
+        if not building:
+            raise HTTPException(status_code=404, detail="Building not found")
+        return building
+    except SimulationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Unexpected error getting building {building_id}: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error while retrieving building")
+        logger.error(f"Unexpected error getting building: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get(
     f"{API_PREFIX}/buildings",
@@ -137,16 +152,22 @@ async def get_building_endpoint(building_id: str):
     summary="Listar todos los edificios",
     description="Recupera una lista de todos los edificios en el sistema, con paginación opcional usando skip y limit."
 )
-async def list_buildings_endpoint(skip: int = 0, limit: int = 100):
+async def list_buildings_endpoint(
+    skip: int = 0, 
+    limit: int = 100,
+    client_id: str = Depends(get_client_id)
+):
     global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
-        buildings_db = simulation_engine.get_all_buildings(skip=skip, limit=limit)
-        return buildings_db
+        buildings = simulation_engine.get_all_buildings(client_id, skip, limit)
+        return buildings
+    except SimulationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Error listing buildings: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error while listing buildings")
+        logger.error(f"Unexpected error listing buildings: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.put(
     f"{API_PREFIX}/buildings/{{building_id}}",
@@ -155,23 +176,24 @@ async def list_buildings_endpoint(skip: int = 0, limit: int = 100):
     summary="Actualizar un edificio existente",
     description="Actualiza los detalles de un edificio existente identificado por su ID. Solo se actualizarán los campos proporcionados."
 )
-async def update_building_endpoint(building_id: str, building_data: api_validators.BuildingUpdate):
+async def update_building_endpoint(
+    building_id: str, 
+    building_data: api_validators.BuildingUpdate,
+    client_id: str = Depends(get_client_id)
+):
     global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
-        updated_building_db_model = simulation_engine.update_building(building_id, building_data)
-        if not updated_building_db_model:
-            raise HTTPException(status_code=404, detail=f"Building with id {building_id} not found")
-        return api_validators.BuildingRead.from_orm(updated_building_db_model)
+        updated_building = simulation_engine.update_building(building_id, client_id, building_data)
+        if not updated_building:
+            raise HTTPException(status_code=404, detail="Building not found")
+        return updated_building
     except SimulationError as e:
-        logger.error(f"Error updating building {building_id}: {e}")
         raise HTTPException(status_code=400, detail=str(e))
-    except HTTPException as http_exc:
-        raise http_exc
     except Exception as e:
-        logger.error(f"Unexpected error updating building {building_id}: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error while updating building")
+        logger.error(f"Unexpected error updating building: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.delete(
     f"{API_PREFIX}/buildings/{{building_id}}",
@@ -180,23 +202,23 @@ async def update_building_endpoint(building_id: str, building_data: api_validato
     summary="Eliminar un edificio por ID",
     description="Elimina un edificio y toda su jerarquía (pisos, habitaciones, dispositivos) usando su ID único."
 )
-async def delete_building_endpoint(building_id: str):
+async def delete_building_endpoint(
+    building_id: str,
+    client_id: str = Depends(get_client_id)
+):
     global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
-        success = simulation_engine.delete_building(building_id)
+        success = simulation_engine.delete_building(building_id, client_id)
         if not success:
-            raise HTTPException(status_code=404, detail=f"Building with id {building_id} not found")
+            raise HTTPException(status_code=404, detail="Building not found")
         return None
-    except HTTPException as http_exc:
-        raise http_exc
     except SimulationError as e:
-        logger.error(f"Error deleting building {building_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Unexpected error deleting building {building_id}: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error while deleting building")
+        logger.error(f"Unexpected error deleting building: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 # --- Control de Simulación (Simulation Control) ---
 
@@ -210,24 +232,22 @@ async def delete_building_endpoint(building_id: str):
 async def set_building_simulation_status_endpoint(
     building_id: str, 
     status: bool = Query(..., description="True para activar, False para desactivar la simulación"),
+    client_id: str = Depends(get_client_id),
     db: Session = Depends(get_db)
 ):
     global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
-        updated_building = simulation_engine.update_building_simulation_status(building_id, status, db)
+        updated_building = simulation_engine.update_building_simulation_status(building_id, client_id, status, db)
         if not updated_building:
-            raise HTTPException(status_code=404, detail=f"Building with id {building_id} not found")
-        return api_validators.BuildingRead.from_orm(updated_building)
+            raise HTTPException(status_code=404, detail="Building not found")
+        return updated_building
     except SimulationError as e:
-        logger.error(f"Error updating simulation status for building {building_id}: {e}")
         raise HTTPException(status_code=400, detail=str(e))
-    except HTTPException as http_exc:
-        raise http_exc
     except Exception as e:
-        logger.error(f"Unexpected error setting simulation status for building {building_id}: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error while setting simulation status")
+        logger.error(f"Unexpected error setting building simulation status: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post(
     f"{API_PREFIX}/floors/{{floor_id}}/simulate",
@@ -950,25 +970,20 @@ async def list_alarms_endpoint(
     start_date: Optional[datetime] = Query(None, description="Inicio del rango de fechas para 'triggered_at' de la alarma"),
     end_date: Optional[datetime] = Query(None, description="Fin del rango de fechas para 'triggered_at' de la alarma"),
     skip: int = 0,
-    limit: int = 100
+    limit: int = 100,
+    client_id: str = Depends(get_client_id)
 ):
     global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
-        alarms_db = simulation_engine.get_alarms(
-            status=status,
-            severity=severity,
-            building_id=building_id,
-            start_date=start_date,
-            end_date=end_date,
-            skip=skip,
-            limit=limit
-        )
-        return alarms_db
+        alarms = simulation_engine.get_alarms(status, severity, building_id, client_id, start_date, end_date, skip, limit)
+        return alarms
+    except SimulationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Error listing alarms: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error while listing alarms")
+        logger.error(f"Unexpected error listing alarms: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post(
     f"{API_PREFIX}/alarms/{{alarm_id}}/ack",
@@ -1092,20 +1107,18 @@ class KPIDashboardResponse(api_validators.BaseModel):
     summary="Obtener Indicadores Clave de Rendimiento para el panel de control",
     description="Recupera un conjunto de Indicadores Clave de Rendimiento (KPIs) para mostrar en un panel de control."
 )
-async def get_kpi_dashboard_endpoint():
+async def get_kpi_dashboard_endpoint(client_id: str = Depends(get_client_id)):
     global simulation_engine
     if not simulation_engine:
         raise HTTPException(status_code=503, detail="Simulation engine not available")
     try:
-        kpi_data = simulation_engine.get_kpi_dashboard_data()
+        kpi_data = simulation_engine.get_kpi_dashboard_data(client_id)
         return KPIDashboardResponse(**kpi_data)
-
     except SimulationError as e:
-        logger.error(f"Error fetching KPI dashboard data: {e}")
-        raise HTTPException(status_code=500, detail=f"Error calculating KPIs: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Unexpected error fetching KPI dashboard data: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error while fetching KPI data")
+        logger.error(f"Unexpected error getting KPI dashboard data: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 # --- WebSocket para Telemetría en Tiempo Real ---
 # El motor de simulación publicará eventos de telemetría a una cola,

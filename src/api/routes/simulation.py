@@ -314,3 +314,17 @@ async def get_live_building_data(
     except Exception as e:
         print(f"Error en get_live_building_data: {e}")
         raise HTTPException(status_code=500, detail="Error al obtener datos en vivo.")
+
+@router.post("/simulations/start_global_emit_only", tags=["Simulation"])
+async def start_global_simulation_emit_only(request: Request):
+    """
+    Inicia la simulación global en modo 'emit only':
+    - Cambia is_simulating a True en todos los edificios, pisos y habitaciones.
+    - Arranca el loop principal del motor de simulación SOLO emitiendo datos (no guarda en la DB).
+    """
+    app = request.app
+    simulation_engine = app.state.simulation_engine
+    if getattr(simulation_engine, "status", None) == "running":
+        return {"detail": "Simulation already running."}
+    await simulation_engine.start_engine_main_loop(emit_only=True)
+    return {"detail": "Global simulation started in emit-only mode."}

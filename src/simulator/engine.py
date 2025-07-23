@@ -96,6 +96,7 @@ class SimulationEngine:
         try:
             db_building = Building(
                 id=str(uuid.uuid4()), # Generate UUID for the building
+                client_id=building_data.client_id, # Multi-tenancy: asignar cliente
                 name=building_data.name,
                 address=building_data.address,
                 geolocation=building_data.geolocation
@@ -104,7 +105,7 @@ class SimulationEngine:
             db.add(db_building)
             db.commit()
             db.refresh(db_building)
-            self.logger.info(f"Building created with ID: {db_building.id}")
+            self.logger.info(f"Building created with ID: {db_building.id} for client: {building_data.client_id}")
             return db_building
         except IntegrityError as e:
             db.rollback()
@@ -117,26 +118,37 @@ class SimulationEngine:
         finally:
             db.close()
 
-    def get_building_by_id(self, building_id: str, db: Optional[Session] = None) -> Optional[Building]:
+    def get_building_by_id(self, building_id: str, client_id: str, db: Optional[Session] = None) -> Optional[Building]:
         db = self._get_db(db)
         try:
-            building = db.query(Building).filter(Building.id == building_id).first()
+            # Multi-tenancy: solo retornar edificios del cliente específico
+            building = db.query(Building).filter(
+                Building.id == building_id,
+                Building.client_id == client_id
+            ).first()
             return building
         finally:
             if not db: db.close() # Close only if session was created internally
 
-    def get_all_buildings(self, skip: int = 0, limit: int = 100, db: Optional[Session] = None) -> List[Building]:
+    def get_all_buildings(self, client_id: str, skip: int = 0, limit: int = 100, db: Optional[Session] = None) -> List[Building]:
         db = self._get_db(db)
         try:
-            buildings = db.query(Building).offset(skip).limit(limit).all()
+            # Multi-tenancy: solo retornar edificios del cliente específico
+            buildings = db.query(Building).filter(
+                Building.client_id == client_id
+            ).offset(skip).limit(limit).all()
             return buildings
         finally:
             if not db: db.close()
 
-    def update_building(self, building_id: str, building_update_data: api_validators.BuildingUpdate, db: Optional[Session] = None) -> Optional[Building]:
+    def update_building(self, building_id: str, client_id: str, building_update_data: api_validators.BuildingUpdate, db: Optional[Session] = None) -> Optional[Building]:
         db = self._get_db(db)
         try:
-            db_building = db.query(Building).filter(Building.id == building_id).first()
+            # Multi-tenancy: solo actualizar edificios del cliente específico
+            db_building = db.query(Building).filter(
+                Building.id == building_id,
+                Building.client_id == client_id
+            ).first()
             if not db_building:
                 return None
 
@@ -151,7 +163,7 @@ class SimulationEngine:
             db.add(db_building) # Add to session if it was detached or to mark as dirty
             db.commit()
             db.refresh(db_building)
-            self.logger.info(f"Building with ID: {building_id} updated.")
+            self.logger.info(f"Building with ID: {building_id} updated for client: {client_id}")
             return db_building
         except Exception as e:
             db.rollback()
@@ -160,17 +172,21 @@ class SimulationEngine:
         finally:
             db.close()
 
-    def delete_building(self, building_id: str, db: Optional[Session] = None) -> bool:
+    def delete_building(self, building_id: str, client_id: str, db: Optional[Session] = None) -> bool:
         db = self._get_db(db)
         try:
-            db_building = db.query(Building).filter(Building.id == building_id).first()
+            # Multi-tenancy: solo eliminar edificios del cliente específico
+            db_building = db.query(Building).filter(
+                Building.id == building_id,
+                Building.client_id == client_id
+            ).first()
             if not db_building:
-                self.logger.warning(f"Attempted to delete non-existent building with ID: {building_id}")
+                self.logger.warning(f"Attempted to delete non-existent building with ID: {building_id} for client: {client_id}")
                 return False
             
             db.delete(db_building)
             db.commit()
-            self.logger.info(f"Building with ID: {building_id} and its hierarchy deleted.")
+            self.logger.info(f"Building with ID: {building_id} and its hierarchy deleted for client: {client_id}")
             return True
         except Exception as e:
             db.rollback()
@@ -579,7 +595,7 @@ class SimulationEngine:
         finally: db.close()
 
     # --- Alarm Operations ---
-    def get_alarms(self, status: Optional[str], severity: Optional[str], building_id: Optional[str],
+    def get_alarms(self, status: Optional[str], severity: Optional[str], building_id: Optional[str], client_id: Optional[str],
                    start_date: Optional[datetime], end_date: Optional[datetime],
                    skip: int, limit: int, db: Optional[Session] = None) -> List[Alarm]:
         db = self._get_db(db)
@@ -594,6 +610,12 @@ class SimulationEngine:
                                .join(Room, Device.room_id == Room.id)\
                                .join(Floor, Room.floor_id == Floor.id)\
                                .filter(Floor.building_id == building_id)
+            if client_id: # Multi-tenancy: filtrar por cliente a través de la jerarquía
+                query = query.join(Device, Alarm.device_id == Device.id)\
+                               .join(Room, Device.room_id == Room.id)\
+                               .join(Floor, Room.floor_id == Floor.id)\
+                               .join(Building, Floor.building_id == Building.id)\
+                               .filter(Building.client_id == client_id)
             return query.order_by(Alarm.triggered_at.desc()).offset(skip).limit(limit).all()
         finally:
             if not db:
@@ -639,18 +661,35 @@ class SimulationEngine:
             ]
         return []
 
-    def get_kpi_dashboard_data(self, db: Optional[Session] = None) -> Dict[str, Any]:
+    def get_kpi_dashboard_data(self, client_id: str, db: Optional[Session] = None) -> Dict[str, Any]:
         # This method should calculate or retrieve KPIs.
         # For now, returning placeholder data.
         db = self._get_db(db)
         try:
-            active_alarms_count = db.query(Alarm).filter(Alarm.status == "NEW").count()
+            # Multi-tenancy: filtrar alarmas por cliente
+            active_alarms_count = db.query(Alarm).join(Device).join(Room).join(Floor).join(Building).filter(
+                Alarm.status == "NEW",
+                Building.client_id == client_id
+            ).count()
+            
+            # Multi-tenancy: filtrar dispositivos por cliente
+            devices_count = db.query(Device).join(Room).join(Floor).join(Building).filter(
+                Building.client_id == client_id
+            ).count()
+            
+            active_devices_count = db.query(Device).join(Room).join(Floor).join(Building).filter(
+                Device.is_active == True,
+                Building.client_id == client_id
+            ).count()
+            
             # More complex KPIs would involve more queries/calculations
             return {
                 "total_consumption_live": random.uniform(5.0, 15.0), # Placeholder
                 "active_alarms_count": active_alarms_count,
                 "average_temperature_building": random.uniform(18.0, 25.0), # Placeholder
-                "devices_on_count": db.query(Device).filter(Device.is_active == True).count() # Example
+                "devices_on_count": active_devices_count,
+                "total_devices_count": devices_count,
+                "client_id": client_id
             }
         finally:
             if not db:
@@ -831,9 +870,25 @@ class SimulationEngine:
         return telemetry_data
 
     async def store_telemetry_data(self, device_id: str, key: str, value: float, unit: str, timestamp: datetime, db: Optional[Session] = None):
-        """Stores a single telemetry data point."""
+        """Stores a single telemetry data point, or solo emite si emit_only=True."""
+        telemetry_message = {
+            "device_id": device_id,
+            "key": key,
+            "value": value,
+            "unit": unit,
+            "timestamp": timestamp.isoformat().replace("+00:00", "Z")
+        }
+        # Si está en modo emit_only, solo publica en WebSocket y retorna
+        if getattr(self, "emit_only", False):
+            if self._telemetry_queue:
+                try:
+                    await self._telemetry_queue.put(telemetry_message)
+                except Exception as q_e:
+                    self.logger.error(f"Error putting telemetry on queue: {q_e}")
+            return
+        # Modo normal: guardar en DB y publicar en WebSocket
         _db_session_created_internally = (db is None)
-        db_session = self._get_db(db) # Use injected db session if available
+        db_session = self._get_db(db)
         try:
             reading = SensorReading(
                 device_id=device_id,
@@ -845,21 +900,11 @@ class SimulationEngine:
             db_session.add(reading)
             db_session.commit()
             self.logger.debug(f"Stored telemetry for {device_id}: {key}={value} {unit}")
-
-            # Publish to real-time telemetry queue if available
             if self._telemetry_queue:
                 try:
-                    telemetry_message = {
-                        "device_id": device_id,
-                        "key": key,
-                        "value": value,
-                        "unit": unit,
-                        "timestamp": timestamp.isoformat().replace("+00:00", "Z")
-                    }
                     await self._telemetry_queue.put(telemetry_message)
                 except Exception as q_e:
                     self.logger.error(f"Error putting telemetry on queue: {q_e}")
-
         except IntegrityError as e:
             db_session.rollback()
             self.logger.error(f"IntegrityError storing telemetry for {device_id}: {e.orig}", exc_info=True)
@@ -871,22 +916,14 @@ class SimulationEngine:
                 db_session.close()
 
     async def run_continuous_simulation_loop(self):
-        """Loop de simulación continuo: genera telemetría y se detiene solo al recibir una señal de stop."""
         self.logger.info(f"SimulationEngine {self.engine_id} continuous loop started.")
         self.status = "running"
-        
-        while self.status == "running": # Loop continuo
+        while self.status == "running":
             current_loop_time = datetime.now(timezone.utc)
             self.logger.debug(f"Simulation loop tick at {current_loop_time}")
-
-            # 1. Generar telemetría para dispositivos activos y simulando
-            # Pasar la sesión de la base de datos para que no se cierre prematuramente
             with self.db_session_local() as db_session:
                 await self.generate_telemetry_for_simulating_devices(current_loop_time, db_session)
-            # 2. (Opcional) Ejecutar otras tareas si quieres
-
-            await asyncio.sleep(5) # Pausa configurable para el siguiente tick de simulación (e.g., cada 5 segundos)
-
+            await asyncio.sleep(5)
         self.logger.info(f"SimulationEngine {self.engine_id} continuous loop stopped.")
         self.status = "stopped"
 
@@ -898,17 +935,21 @@ class SimulationEngine:
     # `start`/`stop` might refer to the engine's main loop, not discrete simulations.
     
     # Example of how an old method might be refactored or replaced:
-    def update_building_simulation_status(self, building_id: str, is_simulating: bool, db: Optional[Session] = None) -> Optional[Building]:
+    def update_building_simulation_status(self, building_id: str, client_id: str, is_simulating: bool, db: Optional[Session] = None) -> Optional[Building]:
         _db_session_created_internally = (db is None)
         db_session = self._get_db(db)
         try:
-            db_building = db_session.query(Building).filter(Building.id == building_id).first()
+            # Multi-tenancy: solo actualizar edificios del cliente específico
+            db_building = db_session.query(Building).filter(
+                Building.id == building_id,
+                Building.client_id == client_id
+            ).first()
             if not db_building: return None
             db_building.is_simulating = is_simulating
             db_building.updated_at = datetime.now(timezone.utc)
             db_session.commit()
             db_session.refresh(db_building)
-            self.logger.info(f"Building {building_id} simulation status set to {is_simulating}.")
+            self.logger.info(f"Building {building_id} simulation status set to {is_simulating} for client: {client_id}")
             return db_building
         except Exception as e:
             db_session.rollback(); raise SimulationError(f"Could not update building simulation status: {e}")
@@ -1021,15 +1062,17 @@ class SimulationEngine:
     # The old `start`, `get_status`, `_run_simulation`, `stop_simulation` methods
     # managed discrete simulation runs. These are largely superseded by the
     # continuous worker model. The engine itself can be "started" or "stopped".
-    async def start_engine_main_loop(self):
+    async def start_engine_main_loop(self, emit_only: bool = False):
+        self.emit_only = emit_only
         if self.status != "running":
             self.status = "running"
             if not self._main_loop_task or self._main_loop_task.done():
                 self._main_loop_task = asyncio.create_task(self.run_continuous_simulation_loop())
-            # Iniciar el worker de agregación si no está corriendo
-            if not self._aggregation_worker_task or self._aggregation_worker_task.done():
-                self._aggregation_worker_running = True
-                self._aggregation_worker_task = asyncio.create_task(self.start_aggregation_worker(60))
+            # Solo iniciar el worker de agregación si NO es modo emit_only
+            if not emit_only:
+                if not self._aggregation_worker_task or self._aggregation_worker_task.done():
+                    self._aggregation_worker_running = True
+                    self._aggregation_worker_task = asyncio.create_task(self.start_aggregation_worker(60))
         else:
             self.logger.info("Engine main loop is already running.")
 

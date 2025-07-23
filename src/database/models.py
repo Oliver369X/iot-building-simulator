@@ -30,6 +30,7 @@ class Building(MixinAsDict, Base):
     __tablename__ = 'buildings'
     
     id = Column(String, primary_key=True) # Assuming UUIDs are stored as strings
+    client_id = Column(String, nullable=False, index=True) # Multi-tenancy: cada edificio pertenece a un cliente
     name = Column(Text, nullable=False)
     address = Column(Text)
     geolocation = Column(JSONB) # JSONB for geo data
